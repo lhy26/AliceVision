@@ -29,7 +29,7 @@ bool refineSequence(std::vector<LocalizationResult> & vec_localizationResult,
                     bool b_no_distortion /*= false*/,
                     bool b_refine_pose /*= true*/,
                     bool b_refine_structure /*= false*/,
-                    const std::string outputFilename /*= ""*/,
+                    const std::string & outputFilename /*= ""*/,
                     std::size_t minPointVisibility /*=0*/)
 {
   
@@ -337,8 +337,8 @@ bool refineSequence(std::vector<LocalizationResult> & vec_localizationResult,
   return b_BA_Status;
 }
 
-bool refineRigPose(const std::vector<geometry::Pose3 > &vec_subPoses,
-                   const std::vector<localization::LocalizationResult> vec_localizationResults,
+bool refineRigPose(const std::vector<geometry::Pose3 > & vec_subPoses,
+                   const std::vector<localization::LocalizationResult> & vec_localizationResults,
                    geometry::Pose3 & rigPose)
 {
   const std::size_t numCameras = vec_localizationResults.size();
