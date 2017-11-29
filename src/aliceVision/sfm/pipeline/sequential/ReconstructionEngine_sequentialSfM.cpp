@@ -16,6 +16,8 @@
 #include "aliceVision/multiview/essential.hpp"
 #include "aliceVision/multiview/triangulation/triangulationDLT.hpp"
 #include "aliceVision/multiview/triangulation/Triangulation.hpp"
+#include "aliceVision/multiview/triangulation/NViewsTriangulationLORansac.hpp"
+#include <aliceVision/robustEstimation/ScoreEvaluator.hpp>
 #include "aliceVision/graph/connectedComponent.hpp"
 #include "aliceVision/stl/stl.hpp"
 #include "aliceVision/system/Timer.hpp"
@@ -289,7 +291,8 @@ void ReconstructionEngine_sequentialSfM::RobustResectionOfImages(
     //BundleAdjustment();
 
     // triangulate
-    triangulate(_sfm_data, prevReconstructedViews, newReconstructedViews);
+//    triangulate(_sfm_data, prevReconstructedViews, newReconstructedViews);
+    triangulateMultiViews_LORANSAC(_sfm_data, prevReconstructedViews, newReconstructedViews);
 
     if (bImageAdded)
     {
@@ -1477,6 +1480,179 @@ bool ReconstructionEngine_sequentialSfM::Resection(const std::size_t viewIndex)
 
   return true;
 }
+
+void ReconstructionEngine_sequentialSfM::triangulateMultiViews_LORANSAC(SfMData& scene, const std::set<IndexT>& previousReconstructedViews, const std::set<IndexT>& newReconstructedViews)
+{
+  ALICEVISION_LOG_DEBUG("Triangulating (mode: multi-view LO-RANSAC)... ");
+  // Pipeline (Per-Track approach)
+  //  1. From the new views, find all the tracks that can be updated or reconstructed
+  //  2. For each track, 
+  //     a) if the track is already recosntructed -> redo a robust triangulation with Lo-Ransac
+  //     b) do the robust reconstruction if there are enough features associated with cameras with known pose.
+  
+  
+  /* Inputs parameters */
+  const std::size_t kMinNbObservations = 3;
+  const double threshold = 4.0;
+  const double outliersProbability = 0.01;
+
+  // This map contains all the tracks that will be triangulated (for the first time, or not)
+  // These tracks are seen by at least one new reconstructed view.
+  std::map<IndexT, std::set<IndexT>> mapTracksToTriangulate; // <trackId, set<viewId>> 
+  
+  // -- Identify the tracks to triangulate
+  {
+    std::vector<IndexT> intersection;
+    std::set_intersection(
+          newReconstructedViews.begin(),
+          newReconstructedViews.end(),
+          previousReconstructedViews.begin(),
+          previousReconstructedViews.end(),
+          std::back_inserter(intersection));
+    
+    assert(intersection.empty());
+  }
+  std::set<IndexT> reconstructedViews;
+  reconstructedViews.insert(previousReconstructedViews.begin(), previousReconstructedViews.end());
+  reconstructedViews.insert(newReconstructedViews.begin(), newReconstructedViews.end());
+  
+  //  #pragma omp parallel for schedule(dynamic)
+  for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(reconstructedViews.size()); ++i)
+  {
+    std::set<IndexT>::const_iterator iter = reconstructedViews.begin();
+    std::advance(iter, i);
+    const IndexT indexPrev = *iter;
+    
+    for(IndexT indexNew: newReconstructedViews)
+    {
+      if(indexPrev == indexNew)
+        continue;
+      
+      const std::size_t I = std::min((IndexT)indexNew, indexPrev);
+      const std::size_t J = std::max((IndexT)indexNew, indexPrev);
+      
+      
+      // Find track correspondences between I and J
+      const std::set<std::size_t> set_viewIndex = { I, J };
+      track::TracksMap map_tracksCommonIJ;
+      track::TracksUtilsMap::GetTracksInImagesFast(set_viewIndex, _map_tracks, _map_tracksPerView, map_tracksCommonIJ);
+      
+      // Collect tracksIds
+      std::set<std::size_t> commonTracksId;
+      std::transform(map_tracksCommonIJ.begin(), map_tracksCommonIJ.end(),
+                     std::inserter(commonTracksId, commonTracksId.begin()),
+                     stl::RetrieveKey());
+      
+      for (std::size_t trackId : commonTracksId)
+      {
+        mapTracksToTriangulate[trackId].insert(I);      
+        mapTracksToTriangulate[trackId].insert(J);      
+      } // tracks to reconstruct/update
+    } // new reconstructed view
+  } // all recontrusted views
+  
+  std::vector<IndexT> setTracksId;
+  std::transform(mapTracksToTriangulate.begin(), mapTracksToTriangulate.end(),
+                 std::inserter(setTracksId, setTracksId.begin()),
+                 stl::RetrieveKey());
+  
+//#pragma omp parallel for 
+  for (int i = 0; i < setTracksId.size(); ++i)
+  {
+    const IndexT trackId = setTracksId.at(i);
+    std::set<IndexT> & observations = mapTracksToTriangulate.at(trackId); // all views possessing the track
+    
+    bool trackAlreadyExists = false;
+    if (scene.structure.find(trackId) != scene.structure.end())
+      trackAlreadyExists = true;
+    
+    // The track needs to be seen by a min. number of views to be triangulated
+    if (observations.size() < kMinNbObservations)
+      continue;
+    
+    // Prepare data for triangulation (features: 2D points & Ps : projective matrices)
+    Mat2X features(2, observations.size());
+    std::vector< Mat34 > Ps; // 
+    const track::Track & track = _map_tracks.at(trackId);
+  
+    int j = 0;
+    for (const IndexT & viewId : observations)
+    {
+      const View* view = scene.GetViews().at(viewId).get();
+      const IntrinsicBase* cam = scene.GetIntrinsics().at(view->getIntrinsicId()).get();
+      const Pose3 pose = scene.getPose(*view);
+      const Vec2 x = _featuresPerView->getFeatures(viewId, track.descType)[track.featPerView.at(viewId)].coords().cast<double>();
+      const Vec2 x_ud = cam->get_ud_pixel(x); // undistorted 2D point
+      const Mat34 p = cam->get_projective_equivalent(pose);
+      features(0,j) = x_ud(0); 
+      features(1,j) = x_ud(1);
+      Ps.push_back(p);
+      ++j;
+    }
+    
+    // Triangulate 
+    Vec4 X_homogeneous= Vec4::Zero();
+    Vec3 X_euclidean = Vec3::Zero();
+    using TriangulationKernel = LORansacTriangulationKernel<>;
+    TriangulationKernel kernel(features, Ps);
+    robustEstimation::ScoreEvaluator<TriangulationKernel> scorer(threshold);
+    std::vector<std::size_t> inliersIndex;
+    X_homogeneous = robustEstimation::LO_RANSAC(kernel, scorer, &inliersIndex, NULL, false, 100, outliersProbability);
+    HomogeneousToEuclidean(X_homogeneous, &X_euclidean);      
+    
+    // observations = {350, 380, 442}
+    // inliersIndex = [0, 1]
+    // inliers = {350, 380}
+    std::set<IndexT> inliers;
+    for (const auto & id : inliersIndex)
+      inliers.insert(*std::next(observations.begin(), id));
+    
+    
+    // Check triangulation results:
+    // chierality
+    bool isChieral = true;  
+    for (const IndexT & viewId : inliers)
+    {
+      const View* view = scene.GetViews().at(viewId).get();
+      const Pose3 pose = scene.getPose(*view);
+      
+      // Check that the point is in front of all the cameras.
+      if (pose.depth(X_euclidean) < 0 ) 
+      { 
+        isChieral = false;
+        break;
+      }
+    }
+    
+    if (!isChieral || inliers.size() < 2)
+    {
+      if (trackAlreadyExists)
+      {
+//#pragma omp critical
+        scene.structure.erase(trackId);
+      }
+      continue;  
+    }
+    
+    // Add the the landmar to the scene
+    if (trackAlreadyExists)
+    {
+//#pragma omp critical
+      scene.structure.erase(trackId);
+    }
+//#pragma omp critical
+    {
+      Landmark & landmark = scene.structure[trackId];
+      landmark.X = X_euclidean;
+      landmark.descType = track.descType;
+      for (const IndexT & viewId : inliers) // add inliers as observations
+      {
+        const Vec2 x = _featuresPerView->getFeatures(viewId, track.descType)[track.featPerView.at(viewId)].coords().cast<double>();
+        landmark.observations[viewId] = Observation(x, track.featPerView.at(viewId));
+      }
+    }
+  } // for all shared tracks 
+}    
 
 void ReconstructionEngine_sequentialSfM::triangulate(SfMData& scene, const std::set<IndexT>& previousReconstructedViews, const std::set<IndexT>& newReconstructedViews)
 {

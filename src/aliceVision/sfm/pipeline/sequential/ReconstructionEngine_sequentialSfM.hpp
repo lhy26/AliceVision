@@ -188,6 +188,8 @@ private:
    */
   bool Resection(const size_t imageIndex);
 
+  void triangulateMultiViews_LORANSAC(SfMData& scene, const std::set<IndexT>& previousReconstructedViews, const std::set<IndexT>& newReconstructedViews);
+
   /**
    * @brief  Triangulate new possible 2D tracks
    * List tracks that share content with this view and add observations and new 3D track if required.
