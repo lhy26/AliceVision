@@ -202,7 +202,7 @@ bool CCTagLocalizer::localize(const image::Image<unsigned char> & imageGrey,
                               const std::string& imagePath)
 {
   namespace bfs = boost::filesystem;
-  
+
   const CCTagLocalizer::Parameters *param = static_cast<const CCTagLocalizer::Parameters *>(parameters);
   if(!param)
   {
@@ -908,7 +908,7 @@ void kNearestKeyFrames(const feature::CCTAG_Regions & queryRegions,
                        const feature::RegionsPerView & regionsPerView,
                        std::size_t nNearestKeyFrames,
                        std::vector<IndexT> & out_kNearestFrames,
-                       const float similarityThreshold /*=.0f*/)
+                       float similarityThreshold /*=.0f*/)
 {
   out_kNearestFrames.clear();
   
