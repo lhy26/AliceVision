@@ -22,7 +22,7 @@ set(multiview_files_headers
   translationAveraging/solver.hpp
   triangulation/Triangulation.hpp
   triangulation/triangulationDLT.hpp
-  triangulation/solver_triangulate_nviews_LORansac.hpp
+  triangulation/NViewsTriangulationLORansac.hpp
 )
 
 # Sources
@@ -45,7 +45,6 @@ set(multiview_files_sources
   translationAveraging/solverL1Soft.cpp
   triangulation/triangulationDLT.cpp
   triangulation/Triangulation.cpp
-  triangulation/solver_triangulate_nviews_LORansac.cpp
 )
 
 # Test data
